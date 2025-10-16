@@ -16,64 +16,98 @@ logger = logging.getLogger(__name__)
 def format_response(text: str) -> str:
     """
     Takes text from Gemini (potentially with Markdown) and formats it
-    for Telegram's MarkdownV2. It handles both initial analysis responses
-    with headers and follow-up messages without them.
+    for Telegram's MarkdownV2.
     """
-    def process_text_content(content: str) -> str:
+    def escape_markdown_v2_text(text: str, inside_bold: bool = False) -> str:
         """
-        Escapes text for MarkdownV2, but converts Gemini's **bold** to
-        Telegram's *bold* and preserves list formatting.
+        Escapes special characters for MarkdownV2.
+        If inside_bold is True, we're escaping text that will appear between * markers.
         """
-        placeholders = []
-
-        # Protect **bold** text and convert it to Telegram's *bold* format.
-        def bold_replacer(match):
-            inner_content = match.group(1)
-            # Escape characters inside the bold tag that could break formatting.
-            safe_content = re.sub(r'[\[\]()~`>#+\-=|{}.!]', r'\\\g<0>', inner_content)
-            placeholders.append(f"*{safe_content}*")
-            return f"__PLACEHOLDER_{len(placeholders)-1}__"
+        # Characters that need escaping in MarkdownV2
+        escape_chars = r'_*[]()~`>#+-=|{}.!'
         
-        processed_text = re.sub(r'\*\*(.*?)\*\*', bold_replacer, content)
-
-        # Escape all remaining special characters.
-        escape_chars = r"[_*\[\]()~`>#+\-=|{}.!]"
-        processed_text = re.sub(escape_chars, r"\\\g<0>", processed_text)
+        result = []
+        for char in text:
+            if char == '\\':
+                result.append('\\\\')
+            elif char in escape_chars:
+                # If we're inside bold text and it's an asterisk, escape it
+                # Otherwise escape all special chars
+                result.append('\\' + char)
+            else:
+                result.append(char)
         
-        # Restore the protected bold text.
-        for i, replacement in enumerate(placeholders):
-            processed_text = processed_text.replace(f"__PLACEHOLDER_{i}__", replacement)
+        return ''.join(result)
+    
+    def process_bold_text(text: str) -> str:
+        """
+        Process text containing **bold** markers and convert to Telegram MarkdownV2 format.
+        """
+        result = []
+        i = 0
+        
+        while i < len(text):
+            # Check for bold marker
+            if i < len(text) - 1 and text[i:i+2] == '**':
+                # Find the closing **
+                end = text.find('**', i + 2)
+                if end != -1:
+                    # Extract content between ** markers
+                    bold_content = text[i+2:end]
+                    # Escape the content for MarkdownV2
+                    escaped_content = escape_markdown_v2_text(bold_content, inside_bold=True)
+                    # Add as Telegram bold (single *)
+                    result.append(f'*{escaped_content}*')
+                    i = end + 2
+                    continue
             
-        # Fix list formatting that may have been broken by the escaper.
-        # Un-escape the dot in numbered lists (e.g., "1\." -> "1.").
-        processed_text = re.sub(r'(?m)^(\s*\d+)\\\.', r'\1.', processed_text)
-        # Replace an escaped leading asterisk with a bullet point for clarity.
-        processed_text = re.sub(r'(?m)^\\\*\s', '• ', processed_text)
-
-        return processed_text
-
-    # Split the response by known headers to format it section by section.
-    sections = re.split(r'\n(Extracted Japanese Text|English Translation|Vocabulary Breakdown|Grammar Analysis)\n', text)
-    
-    # If splitting results in only one part, no headers were found.
-    # This indicates a follow-up message, so we process the entire text.
-    if len(sections) <= 1:
-        return process_text_content(text)
-    
-    # Headers were found; format each section.
-    formatted_parts = []
-    # The first element of sections is anything before the first header, usually empty.
-    # We iterate through header-content pairs.
-    for i in range(1, len(sections), 2):
-        header = sections[i]
-        content = sections[i+1].strip()
+            # Not a bold section, accumulate regular text
+            regular_text_start = i
+            # Find next ** or end of string
+            next_bold = text.find('**', i)
+            if next_bold == -1:
+                # No more bold, take rest of string
+                regular_text = text[i:]
+                i = len(text)
+            else:
+                # Take text up to next bold
+                regular_text = text[i:next_bold]
+                i = next_bold
+            
+            if regular_text:
+                result.append(escape_markdown_v2_text(regular_text, inside_bold=False))
         
-        # Make the header bold.
-        formatted_parts.append(f"*{header}*")
-        # Process the content of the section.
-        formatted_parts.append(process_text_content(content))
-
-    return "\n\n".join(formatted_parts)
+        return ''.join(result)
+    
+    # Split by headers
+    header_pattern = r'\n(Extracted Japanese Text|English Translation|Vocabulary Breakdown|Grammar Analysis)\n'
+    sections = re.split(header_pattern, text)
+    
+    # If no headers found, process entire text
+    if len(sections) <= 1:
+        return process_bold_text(text.strip())
+    
+    # Process each section
+    formatted_parts = []
+    
+    # Handle content before first header
+    if sections[0].strip():
+        formatted_parts.append(process_bold_text(sections[0].strip()))
+    
+    # Process header/content pairs
+    for i in range(1, len(sections), 2):
+        if i+1 < len(sections):
+            header = sections[i]
+            content = sections[i+1].strip()
+            
+            # Escape header and make it bold
+            escaped_header = escape_markdown_v2_text(header, inside_bold=True)
+            formatted_parts.append(f'*{escaped_header}*')
+            
+            # Process content
+            formatted_parts.append(process_bold_text(content))
+    
+    return '\n\n'.join(formatted_parts)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -89,18 +123,17 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Handles text messages from the user."""
     user_id = update.message.from_user.id
     user_text = update.message.text
-    
+
     loading_message = await update.message.reply_text("⏳ Analyzing, please wait\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
     try:
         raw_response = get_gemini_response(user_id, text=user_text)
         if not raw_response.strip():
-             raise ValueError("Received empty response from API")
+            raise ValueError("Received empty response from API")
         formatted_response = format_response(raw_response)
         await loading_message.edit_text(formatted_response, parse_mode=ParseMode.MARKDOWN_V2)
     except BadRequest as e:
         logger.warning(f"MarkdownV2 parsing failed: {e}. Sending raw response as plain text.")
-        # As a fallback, send the original unformatted response.
         await loading_message.edit_text(raw_response)
     except Exception as e:
         logger.error(f"Error processing text message: {e}")
@@ -109,7 +142,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles image messages from the user."""
     user_id = update.message.from_user.id
-    
+
     loading_message = await update.message.reply_text("⏳ Analyzing image, please wait\\.\\.\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
     try:
@@ -118,12 +151,11 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
         user_caption = update.message.caption or ""
         raw_response = get_gemini_response(user_id, text=user_caption, image_bytes=bytes(photo_bytes))
         if not raw_response.strip():
-             raise ValueError("Received empty response from API")
+            raise ValueError("Received empty response from API")
         formatted_response = format_response(raw_response)
         await loading_message.edit_text(formatted_response, parse_mode=ParseMode.MARKDOWN_V2)
     except BadRequest as e:
         logger.warning(f"MarkdownV2 parsing failed: {e}. Sending raw response as plain text.")
-        # As a fallback, send the original unformatted response.
         await loading_message.edit_text(raw_response)
     except Exception as e:
         logger.error(f"Error processing image message: {e}")

@@ -46,6 +46,7 @@ def get_gemini_response(user_id, text=None, image_bytes=None):
             "Use Markdown for emphasis (e.g., **bold** for key terms). I will handle the final formatting for the platform.",
             "Under 'Vocabulary Breakdown', list each word on a new line. **DO NOT use tables or the '|' character.** Use a format like: '**Word** (Reading) - Part of Speech: Meaning.'",
             "Under 'Grammar Analysis', provide a concise explanation. You can use numbers (e.g., '1.', '2.') or asterisks ('* ') for bullet points if needed.",
+            "Keep vocabulary and grammar explanations brief and clear.",
         ]
         if text:
             prompt_parts.append(f"\nHere is the sentence from your student: {text}")
