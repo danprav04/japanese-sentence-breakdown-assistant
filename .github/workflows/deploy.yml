@@ -77,10 +77,13 @@ jobs:
   deploy-to-server:
     name: Deploy to Production Server
     runs-on: ubuntu-latest
-    needs: build-and-push-image # This job only runs if the build job succeeds
+    needs: build-and-push-image
     environment: production
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Validate secrets are present
         run: |
           if [ -z "${{ secrets.SSH_HOST }}" ]; then echo "Error: SSH_HOST secret is not set." >&2; exit 1; fi
@@ -96,7 +99,7 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Deploy to server via SSH
+      - name: Deploy to Server
         env:
           TARGET_SSH_HOST: ${{ secrets.SSH_HOST }}
           TARGET_SSH_USER: ${{ secrets.SSH_USER }}
@@ -108,46 +111,20 @@ jobs:
           GEMINI_VISION_MODEL: ${{ secrets.GEMINI_VISION_MODEL || 'gemini-pro-vision' }}
           GEMINI_TEXT_MODEL: ${{ secrets.GEMINI_TEXT_MODEL || 'gemini-pro' }}
         run: |
+          # Add the server's host key to known_hosts to avoid interactive prompts
           ssh-keyscan -H "${TARGET_SSH_HOST}" >> ~/.ssh/known_hosts
 
-          # Pipe the entire deployment script to the remote server's shell.
-          # This robustly handles multi-line scripts and variable expansion on the remote host.
-          ssh -o StrictHostKeyChecking=no "${TARGET_SSH_USER}@${TARGET_SSH_HOST}" bash << EOF
-            set -ex
+          # Securely copy the deployment script to the remote server
+          scp ./scripts/deploy.sh ${TARGET_SSH_USER}@${TARGET_SSH_HOST}:/tmp/deploy_bot.sh
 
-            # Log in to GitHub Container Registry to pull the private image
-            echo "${GHCR_PULL_TOKEN}" | sudo docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
-
-            # Create the systemd service file. Variables are expanded by the remote shell.
-            sudo tee /etc/systemd/system/${CONTAINER_NAME}.service > /dev/null << EOT
-[Unit]
-Description=${CONTAINER_NAME} Docker Container
-Requires=docker.service
-After=docker.service network.target
-
-[Service]
-Restart=always
-RestartSec=10
-
-ExecStartPre=-/usr/bin/docker stop ${CONTAINER_NAME}
-ExecStartPre=-/usr/bin/docker rm ${CONTAINER_NAME}
-ExecStartPre=/usr/bin/docker pull ${FULL_IMAGE_URI}
-ExecStart=/usr/bin/docker run --rm --name ${CONTAINER_NAME} \
-  -e TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN}" \
-  -e GEMINI_API_KEY="${GEMINI_API_KEY}" \
-  -e GEMINI_VISION_MODEL="${GEMINI_VISION_MODEL}" \
-  -e GEMINI_TEXT_MODEL="${GEMINI_TEXT_MODEL}" \
-  ${FULL_IMAGE_URI}
-ExecStop=/usr/bin/docker stop ${CONTAINER_NAME}
-
-[Install]
-WantedBy=multi-user.target
-EOT
-
-            # Reload systemd, enable the service to start on boot, and restart it to apply changes
-            sudo systemctl daemon-reload
-            sudo systemctl enable "${CONTAINER_NAME}.service"
-            sudo systemctl restart "${CONTAINER_NAME}.service"
-
-            echo "Deployment of ${CONTAINER_NAME} finished successfully."
-          EOF
+          # Execute the script on the remote server, passing secrets as arguments
+          ssh -o StrictHostKeyChecking=no ${TARGET_SSH_USER}@${TARGET_SSH_HOST} \
+            "bash /tmp/deploy_bot.sh \
+            '${GHCR_USERNAME}' \
+            '${GHCR_PULL_TOKEN}' \
+            '${CONTAINER_NAME}' \
+            '${FULL_IMAGE_URI}' \
+            '${TELEGRAM_BOT_TOKEN}' \
+            '${GEMINI_API_KEY}' \
+            '${GEMINI_VISION_MODEL}' \
+            '${GEMINI_TEXT_MODEL}'"
