@@ -108,20 +108,18 @@ jobs:
           GEMINI_VISION_MODEL: ${{ secrets.GEMINI_VISION_MODEL || 'gemini-pro-vision' }}
           GEMINI_TEXT_MODEL: ${{ secrets.GEMINI_TEXT_MODEL || 'gemini-pro' }}
         run: |
-          # Add the server's host key to known_hosts to avoid interactive prompts
           ssh-keyscan -H "${TARGET_SSH_HOST}" >> ~/.ssh/known_hosts
 
           # Pipe the entire deployment script to the remote server's shell.
-          # This is the most robust way to execute multi-line scripts over SSH.
+          # This robustly handles multi-line scripts and variable expansion on the remote host.
           ssh -o StrictHostKeyChecking=no "${TARGET_SSH_USER}@${TARGET_SSH_HOST}" bash << EOF
             set -ex
 
             # Log in to GitHub Container Registry to pull the private image
             echo "${GHCR_PULL_TOKEN}" | sudo docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
 
-            # Create the systemd service file using a heredoc. This will now be parsed correctly
-            # by the remote shell.
-            sudo tee /etc/systemd/system/${CONTAINER_NAME}.service > /dev/null <<'EOT'
+            # Create the systemd service file. Variables are expanded by the remote shell.
+            sudo tee /etc/systemd/system/${CONTAINER_NAME}.service > /dev/null << EOT
 [Unit]
 Description=${CONTAINER_NAME} Docker Container
 Requires=docker.service
@@ -130,33 +128,21 @@ After=docker.service network.target
 [Service]
 Restart=always
 RestartSec=10
-Environment="TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}"
-Environment="GEMINI_API_KEY=${GEMINI_API_KEY}"
-Environment="GEMINI_VISION_MODEL=${GEMINI_VISION_MODEL}"
-Environment="GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL}"
+
 ExecStartPre=-/usr/bin/docker stop ${CONTAINER_NAME}
 ExecStartPre=-/usr/bin/docker rm ${CONTAINER_NAME}
 ExecStartPre=/usr/bin/docker pull ${FULL_IMAGE_URI}
 ExecStart=/usr/bin/docker run --rm --name ${CONTAINER_NAME} \
-  -e TELEGRAM_BOT_TOKEN \
-  -e GEMINI_API_KEY \
-  -e GEMINI_VISION_MODEL \
-  -e GEMINI_TEXT_MODEL \
+  -e TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN}" \
+  -e GEMINI_API_KEY="${GEMINI_API_KEY}" \
+  -e GEMINI_VISION_MODEL="${GEMINI_VISION_MODEL}" \
+  -e GEMINI_TEXT_MODEL="${GEMINI_TEXT_MODEL}" \
   ${FULL_IMAGE_URI}
 ExecStop=/usr/bin/docker stop ${CONTAINER_NAME}
 
 [Install]
 WantedBy=multi-user.target
 EOT
-
-            # The variables inside the systemd service file need to be expanded.
-            # We replace them now using sed.
-            sudo sed -i 's|${CONTAINER_NAME}|${CONTAINER_NAME}|g' /etc/systemd/system/${CONTAINER_NAME}.service
-            sudo sed -i 's|${TELEGRAM_BOT_TOKEN}|${TELEGRAM_BOT_TOKEN}|g' /etc/systemd/system/${CONTAINER_NAME}.service
-            sudo sed -i 's|${GEMINI_API_KEY}|${GEMINI_API_KEY}|g' /etc/systemd/system/${CONTAINER_NAME}.service
-            sudo sed -i 's|${GEMINI_VISION_MODEL}|${GEMINI_VISION_MODEL}|g' /etc/systemd/system/${CONTAINER_NAME}.service
-            sudo sed -i 's|${GEMINI_TEXT_MODEL}|${GEMINI_TEXT_MODEL}|g' /etc/systemd/system/${CONTAINER_NAME}.service
-            sudo sed -i 's|${FULL_IMAGE_URI}|${FULL_IMAGE_URI}|g' /etc/systemd/system/${CONTAINER_NAME}.service
 
             # Reload systemd, enable the service to start on boot, and restart it to apply changes
             sudo systemctl daemon-reload
