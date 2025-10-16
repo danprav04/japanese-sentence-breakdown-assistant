@@ -34,7 +34,8 @@ def get_gemini_response(user_id, text=None, image_bytes=None):
             "Analyze the following Japanese sentence or the sentence in the image.",
             "Break it down into grammar points with explanations.",
             "Provide the English translation.",
-            "If an image is provided, first extract the Japanese text from it."
+            "If an image is provided, first extract the Japanese text from it.",
+            "Use clear headings and formatting for readability."
         ]
         if text:
             prompt_parts.append(f"\n\nHere is the sentence: '{text}'")
