@@ -1,8 +1,8 @@
 import logging
-import re
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from .config import TELEGRAM_BOT_TOKEN
 from .gemini import get_gemini_response
 
@@ -11,12 +11,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-def escape_markdown_v2(text: str) -> str:
-    """Escapes characters for Telegram's MarkdownV2 parser."""
-    # Characters to escape are: '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'
-    escape_chars = r"[_*\[\]()~`>#+\-=|{}.!]"
-    return re.sub(escape_chars, r"\\\g<0>", text)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message when the /start command is issued."""
@@ -36,12 +30,14 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         response = get_gemini_response(user_id, text=user_text)
-        safe_response = escape_markdown_v2(response)
-        await loading_message.edit_text(safe_response, parse_mode=ParseMode.MARKDOWN_V2)
+        await loading_message.edit_text(response, parse_mode=ParseMode.MARKDOWN_V2)
+    except BadRequest as e:
+        logger.warning(f"MarkdownV2 parsing failed: {e}. Sending as plain text.")
+        # If Markdown fails, send the same response as plain text
+        await loading_message.edit_text(response)
     except Exception as e:
         logger.error(f"Error processing text message: {e}")
-        error_text = escape_markdown_v2("Sorry, I encountered an error. Please try again.")
-        await loading_message.edit_text(error_text, parse_mode=ParseMode.MARKDOWN_V2)
+        await loading_message.edit_text("Sorry, I encountered an error\\. Please try again\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles image messages from the user."""
@@ -54,12 +50,14 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
         photo_bytes = await photo_file.download_as_bytearray()
         user_caption = update.message.caption or ""
         response = get_gemini_response(user_id, text=user_caption, image_bytes=bytes(photo_bytes))
-        safe_response = escape_markdown_v2(response)
-        await loading_message.edit_text(safe_response, parse_mode=ParseMode.MARKDOWN_V2)
+        await loading_message.edit_text(response, parse_mode=ParseMode.MARKDOWN_V2)
+    except BadRequest as e:
+        logger.warning(f"MarkdownV2 parsing failed: {e}. Sending as plain text.")
+        # If Markdown fails, send the same response as plain text
+        await loading_message.edit_text(response)
     except Exception as e:
         logger.error(f"Error processing image message: {e}")
-        error_text = escape_markdown_v2("Sorry, I encountered an error processing the image.")
-        await loading_message.edit_text(error_text, parse_mode=ParseMode.MARKDOWN_V2)
+        await loading_message.edit_text("Sorry, I encountered an error processing the image\\.", parse_mode=ParseMode.MARKDOWN_V2)
 
 def main() -> None:
     """Start the bot."""
