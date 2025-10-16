@@ -1,5 +1,3 @@
-# .github/workflows/deploy.yml
-
 name: Deploy Telegram Bot via Docker
 
 on:
@@ -10,10 +8,8 @@ on:
 env:
   # Configuration for the Docker image and container
   REGISTRY: ghcr.io
-  CONTAINER_NAME: "japanese-analyzer-bot"   # Name for the Docker container & systemd service
-  IMAGE_REPO_NAME: "japanese-analyzer-bot"  # Name for the Docker image repository
-  HOST_PORT: 8080                           # You can change this if needed on your server
-  CONTAINER_PORT: 80                        # The bot doesn't use a port, so this is not applicable but kept for structure
+  CONTAINER_NAME: "japanese-analyzer-bot"
+  IMAGE_REPO_NAME: "japanese-analyzer-bot"
 
 jobs:
   # ====================================================================
@@ -82,9 +78,19 @@ jobs:
     name: Deploy to Production Server
     runs-on: ubuntu-latest
     needs: build-and-push-image # This job only runs if the build job succeeds
-    environment: production   # Links to your "production" environment for secrets
+    environment: production
 
     steps:
+      - name: Validate secrets are present
+        run: |
+          if [ -z "${{ secrets.SSH_HOST }}" ]; then echo "Error: SSH_HOST secret is not set." >&2; exit 1; fi
+          if [ -z "${{ secrets.SSH_USER }}" ]; then echo "Error: SSH_USER secret is not set." >&2; exit 1; fi
+          if [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then echo "Error: SSH_PRIVATE_KEY secret is not set." >&2; exit 1; fi
+          if [ -z "${{ secrets.GHCR_PULL_TOKEN }}" ]; then echo "Error: GHCR_PULL_TOKEN secret is not set." >&2; exit 1; fi
+          if [ -z "${{ secrets.TELEGRAM_BOT_TOKEN }}" ]; then echo "Error: TELEGRAM_BOT_TOKEN secret is not set." >&2; exit 1; fi
+          if [ -z "${{ secrets.GEMINI_API_KEY }}" ]; then echo "Error: GEMINI_API_KEY secret is not set." >&2; exit 1; fi
+        shell: bash
+
       - name: Set up SSH key for server access
         uses: webfactory/ssh-agent@v0.9.0
         with:
@@ -100,47 +106,55 @@ jobs:
           # Pass application secrets to the container
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_VISION_MODEL: ${{ secrets.GEMINI_VISION_MODEL }}
-          GEMINI_TEXT_MODEL: ${{ secrets.GEMINI_TEXT_MODEL }}
+          GEMINI_VISION_MODEL: ${{ secrets.GEMINI_VISION_MODEL || 'gemini-pro-vision' }}
+          GEMINI_TEXT_MODEL: ${{ secrets.GEMINI_TEXT_MODEL || 'gemini-pro' }}
         run: |
           # Add the server's host key to known_hosts to avoid interactive prompts
           ssh-keyscan -H "${TARGET_SSH_HOST}" >> ~/.ssh/known_hosts
 
           # Connect to the server and execute deployment commands.
-          ssh -o StrictHostKeyChecking=no "${TARGET_SSH_USER}@${TARGET_SSH_HOST}" << EOF
+          ssh -o StrictHostKeyChecking=no "${TARGET_SSH_USER}@${TARGET_SSH_HOST}" "
             set -ex
 
             # Log in to GitHub Container Registry to pull the private image
-            echo "${GHCR_PULL_TOKEN}" | sudo docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
+            echo '${GHCR_PULL_TOKEN}' | sudo docker login ghcr.io -u '${GHCR_USERNAME}' --password-stdin
 
-            # Create the systemd service file to manage the container.
-            # This service file passes the necessary environment variables to the bot.
-            echo "[Unit]" | sudo tee "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "Description=${{ env.CONTAINER_NAME }} Docker Container" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "Requires=docker.service" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "After=docker.service network.target" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "[Service]" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "Restart=always" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "RestartSec=10" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "Environment=\"TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}\"" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "Environment=\"GEMINI_API_KEY=${GEMINI_API_KEY}\"" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "Environment=\"GEMINI_VISION_MODEL=${GEMINI_VISION_MODEL}\"" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "Environment=\"GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL}\"" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "ExecStartPre=-/usr/bin/docker stop ${{ env.CONTAINER_NAME }}" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "ExecStartPre=-/usr/bin/docker rm ${{ env.CONTAINER_NAME }}" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "ExecStartPre=/usr/bin/docker pull ${FULL_IMAGE_URI}" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "ExecStart=/usr/bin/docker run --rm --name ${{ env.CONTAINER_NAME }} ${FULL_IMAGE_URI}" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "ExecStop=/usr/bin/docker stop ${{ env.CONTAINER_NAME }}" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "[Install]" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
-            echo "WantedBy=multi-user.target" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            # Create the systemd service file using a heredoc for clarity and safety.
+            # This service file manages the container and injects the necessary environment variables.
+            sudo tee /etc/systemd/system/${CONTAINER_NAME}.service > /dev/null <<EOF
+            [Unit]
+            Description=${CONTAINER_NAME} Docker Container
+            Requires=docker.service
+            After=docker.service network.target
+
+            [Service]
+            Restart=always
+            RestartSec=10
+            Environment=\"TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}\"
+            Environment=\"GEMINI_API_KEY=${GEMINI_API_KEY}\"
+            Environment=\"GEMINI_VISION_MODEL=${GEMINI_VISION_MODEL}\"
+            Environment=\"GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL}\"
+
+            ExecStartPre=-/usr/bin/docker stop ${CONTAINER_NAME}
+            ExecStartPre=-/usr/bin/docker rm ${CONTAINER_NAME}
+            ExecStartPre=/usr/bin/docker pull ${FULL_IMAGE_URI}
+            ExecStart=/usr/bin/docker run --rm --name ${CONTAINER_NAME} \
+              -e TELEGRAM_BOT_TOKEN \
+              -e GEMINI_API_KEY \
+              -e GEMINI_VISION_MODEL \
+              -e GEMINI_TEXT_MODEL \
+              ${FULL_IMAGE_URI}
+            ExecStop=/usr/bin/docker stop ${CONTAINER_NAME}
+
+            [Install]
+            WantedBy=multi-user.target
+            EOF
 
             # Reload systemd, enable the service to start on boot, and restart it to apply changes
             sudo systemctl daemon-reload
-            sudo systemctl enable "${{ env.CONTAINER_NAME }}.service"
-            sudo systemctl restart "${{ env.CONTAINER_NAME }}.service"
+            sudo systemctl enable '${CONTAINER_NAME}.service'
+            sudo systemctl restart '${CONTAINER_NAME}.service'
 
-            echo "Deployment of ${{ env.CONTAINER_NAME }} finished successfully."
-          EOF
+            echo 'Deployment of ${CONTAINER_NAME} finished successfully.'
+          "
         shell: bash
