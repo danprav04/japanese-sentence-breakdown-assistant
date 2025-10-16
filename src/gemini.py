@@ -40,9 +40,10 @@ def get_gemini_response(user_id, text=None, image_bytes=None):
             "English Translation",
             "Vocabulary Breakdown",
             "Grammar Analysis",
-            "\n--- IMPORTANT ---\n",
+            "\n--- INSTRUCTIONS ---\n",
             "DO NOT use any Markdown formatting like '*', '_', '`', or '#'.",
-            "For the Vocabulary Breakdown, provide a table-like structure using spaces for alignment.",
+            "Under 'Vocabulary Breakdown', list each vocabulary word on a new line.",
+            "Under 'Grammar Analysis', provide a detailed explanation. You can use numbers and '*' for bullet points.",
         ]
         if text:
             prompt_parts.append(f"\nHere is the sentence: {text}")
@@ -74,5 +75,3 @@ def get_gemini_response(user_id, text=None, image_bytes=None):
 
     else:
         return "Please send a Japanese sentence or an image with a Japanese sentence."
-
-

@@ -20,35 +20,41 @@ def escape_markdown_v2(text: str) -> str:
 
 def format_response(text: str) -> str:
     """
-    Takes the clean text from Gemini and applies MarkdownV2 formatting.
+    Takes the clean text from Gemini and applies beautiful MarkdownV2 formatting.
     """
-    # Escape the entire response first to make it safe
-    escaped_text = escape_markdown_v2(text)
-
-    # Find the vocabulary section
-    vocab_match = re.search(r"Vocabulary Breakdown\n(.*?)\nGrammar Analysis", escaped_text, re.DOTALL)
-    if vocab_match:
-        # Extract the vocabulary content, un-escape it, and wrap in a code block
-        vocab_content = vocab_match.group(1).strip()
-        # The content of a code block doesn't need escaping
-        unescaped_vocab = vocab_content.replace('\\', '') 
-        code_block = f"```\n{unescaped_vocab}\n```"
-        # Replace the original vocabulary section with the formatted code block
-        escaped_text = escaped_text.replace(vocab_content, code_block)
-
-    # Add bold formatting to headers AFTER processing the code block
-    headers = [
-        "Extracted Japanese Text",
-        "English Translation",
-        "Vocabulary Breakdown",
-        "Grammar Analysis"
-    ]
-    for header in headers:
-        # The header might already be escaped, so we find and replace that version
-        escaped_header = escape_markdown_v2(header)
-        escaped_text = escaped_text.replace(escaped_header, f"*{header}*")
+    # Split the response into sections based on the headers
+    sections = re.split(r'\n(Extracted Japanese Text|English Translation|Vocabulary Breakdown|Grammar Analysis)\n', text)
     
-    return escaped_text
+    formatted_parts = []
+    
+    # The first part is usually empty, so we start from the first header
+    for i in range(1, len(sections), 2):
+        header = sections[i]
+        content = sections[i+1].strip()
+        
+        # Make the header bold
+        formatted_parts.append(f"*{escape_markdown_v2(header)}*")
+        
+        # Special handling for Grammar Analysis to preserve bullet points
+        if header == "Grammar Analysis":
+            lines = content.split('\n')
+            formatted_lines = []
+            for line in lines:
+                # Escape the line, then re-insert the bullet point characters if they exist
+                escaped_line = escape_markdown_v2(line.strip())
+                if line.strip().startswith('*'):
+                    escaped_line = '•' + escaped_line[2:] # Use a unicode bullet
+                elif re.match(r'^\d+\.', line.strip()):
+                    # Preserve numbered lists
+                    escaped_line = re.sub(r'^(\d+)\\\.', r'\1.', escaped_line)
+                formatted_lines.append(escaped_line)
+            formatted_parts.append("\n".join(formatted_lines))
+        else:
+            # For all other sections, just escape the content
+            formatted_parts.append(escape_markdown_v2(content))
+
+    return "\n\n".join(formatted_parts)
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message when the /start command is issued."""
@@ -68,6 +74,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         raw_response = get_gemini_response(user_id, text=user_text)
+        if not raw_response.strip():
+             raise ValueError("Received empty response from API")
         formatted_response = format_response(raw_response)
         await loading_message.edit_text(formatted_response, parse_mode=ParseMode.MARKDOWN_V2)
     except BadRequest as e:
@@ -88,6 +96,8 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
         photo_bytes = await photo_file.download_as_bytearray()
         user_caption = update.message.caption or ""
         raw_response = get_gemini_response(user_id, text=user_caption, image_bytes=bytes(photo_bytes))
+        if not raw_response.strip():
+             raise ValueError("Received empty response from API")
         formatted_response = format_response(raw_response)
         await loading_message.edit_text(formatted_response, parse_mode=ParseMode.MARKDOWN_V2)
     except BadRequest as e:
