@@ -13,45 +13,65 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def escape_markdown_v2(text: str) -> str:
-    """Escapes characters for Telegram's MarkdownV2 parser."""
-    escape_chars = r"[_*\[\]()~`>#+\-=|{}.!]"
-    return re.sub(escape_chars, r"\\\g<0>", text)
-
 def format_response(text: str) -> str:
     """
-    Takes the clean text from Gemini and applies beautiful MarkdownV2 formatting.
+    Takes text from Gemini (potentially with Markdown) and formats it
+    for Telegram's MarkdownV2. It handles both initial analysis responses
+    with headers and follow-up messages without them.
     """
-    # Split the response into sections based on the headers
+    def process_text_content(content: str) -> str:
+        """
+        Escapes text for MarkdownV2, but converts Gemini's **bold** to
+        Telegram's *bold* and preserves list formatting.
+        """
+        placeholders = []
+
+        # Protect **bold** text and convert it to Telegram's *bold* format.
+        def bold_replacer(match):
+            inner_content = match.group(1)
+            # Escape characters inside the bold tag that could break formatting.
+            safe_content = re.sub(r'[\[\]()~`>#+\-=|{}.!]', r'\\\g<0>', inner_content)
+            placeholders.append(f"*{safe_content}*")
+            return f"__PLACEHOLDER_{len(placeholders)-1}__"
+        
+        processed_text = re.sub(r'\*\*(.*?)\*\*', bold_replacer, content)
+
+        # Escape all remaining special characters.
+        escape_chars = r"[_*\[\]()~`>#+\-=|{}.!]"
+        processed_text = re.sub(escape_chars, r"\\\g<0>", processed_text)
+        
+        # Restore the protected bold text.
+        for i, replacement in enumerate(placeholders):
+            processed_text = processed_text.replace(f"__PLACEHOLDER_{i}__", replacement)
+            
+        # Fix list formatting that may have been broken by the escaper.
+        # Un-escape the dot in numbered lists (e.g., "1\." -> "1.").
+        processed_text = re.sub(r'(?m)^(\s*\d+)\\\.', r'\1.', processed_text)
+        # Replace an escaped leading asterisk with a bullet point for clarity.
+        processed_text = re.sub(r'(?m)^\\\*\s', '• ', processed_text)
+
+        return processed_text
+
+    # Split the response by known headers to format it section by section.
     sections = re.split(r'\n(Extracted Japanese Text|English Translation|Vocabulary Breakdown|Grammar Analysis)\n', text)
     
-    formatted_parts = []
+    # If splitting results in only one part, no headers were found.
+    # This indicates a follow-up message, so we process the entire text.
+    if len(sections) <= 1:
+        return process_text_content(text)
     
-    # The first part is usually empty, so we start from the first header
+    # Headers were found; format each section.
+    formatted_parts = []
+    # The first element of sections is anything before the first header, usually empty.
+    # We iterate through header-content pairs.
     for i in range(1, len(sections), 2):
         header = sections[i]
         content = sections[i+1].strip()
         
-        # Make the header bold
-        formatted_parts.append(f"*{escape_markdown_v2(header)}*")
-        
-        # Special handling for Grammar Analysis to preserve bullet points
-        if header == "Grammar Analysis":
-            lines = content.split('\n')
-            formatted_lines = []
-            for line in lines:
-                # Escape the line, then re-insert the bullet point characters if they exist
-                escaped_line = escape_markdown_v2(line.strip())
-                if line.strip().startswith('*'):
-                    escaped_line = '•' + escaped_line[2:] # Use a unicode bullet
-                elif re.match(r'^\d+\.', line.strip()):
-                    # Preserve numbered lists
-                    escaped_line = re.sub(r'^(\d+)\\\.', r'\1.', escaped_line)
-                formatted_lines.append(escaped_line)
-            formatted_parts.append("\n".join(formatted_lines))
-        else:
-            # For all other sections, just escape the content
-            formatted_parts.append(escape_markdown_v2(content))
+        # Make the header bold.
+        formatted_parts.append(f"*{header}*")
+        # Process the content of the section.
+        formatted_parts.append(process_text_content(content))
 
     return "\n\n".join(formatted_parts)
 
@@ -79,7 +99,8 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         formatted_response = format_response(raw_response)
         await loading_message.edit_text(formatted_response, parse_mode=ParseMode.MARKDOWN_V2)
     except BadRequest as e:
-        logger.warning(f"MarkdownV2 parsing failed: {e}. Sending as plain text.")
+        logger.warning(f"MarkdownV2 parsing failed: {e}. Sending raw response as plain text.")
+        # As a fallback, send the original unformatted response.
         await loading_message.edit_text(raw_response)
     except Exception as e:
         logger.error(f"Error processing text message: {e}")
@@ -101,7 +122,8 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
         formatted_response = format_response(raw_response)
         await loading_message.edit_text(formatted_response, parse_mode=ParseMode.MARKDOWN_V2)
     except BadRequest as e:
-        logger.warning(f"MarkdownV2 parsing failed: {e}. Sending as plain text.")
+        logger.warning(f"MarkdownV2 parsing failed: {e}. Sending raw response as plain text.")
+        # As a fallback, send the original unformatted response.
         await loading_message.edit_text(raw_response)
     except Exception as e:
         logger.error(f"Error processing image message: {e}")
