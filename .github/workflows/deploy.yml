@@ -1,0 +1,146 @@
+# .github/workflows/deploy.yml
+
+name: Deploy Telegram Bot via Docker
+
+on:
+  push:
+    branches:
+      - main # Deploys only on pushes to the main branch
+
+env:
+  # Configuration for the Docker image and container
+  REGISTRY: ghcr.io
+  CONTAINER_NAME: "japanese-analyzer-bot"   # Name for the Docker container & systemd service
+  IMAGE_REPO_NAME: "japanese-analyzer-bot"  # Name for the Docker image repository
+  HOST_PORT: 8080                           # You can change this if needed on your server
+  CONTAINER_PORT: 80                        # The bot doesn't use a port, so this is not applicable but kept for structure
+
+jobs:
+  # ====================================================================
+  # JOB 1: Build the Docker image and push it to the GitHub Registry
+  # ====================================================================
+  build-and-push-image:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # Required to push to GitHub Container Registry
+
+    outputs:
+      image_uri: ${{ steps.get-primary-tag.outputs.primary_tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set lowercase image owner
+        run: |
+          echo "IMAGE_OWNER_LC=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata for tagging
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER_LC }}/${{ env.IMAGE_REPO_NAME }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Get the primary image tag for deployment
+        id: get-primary-tag
+        run: |
+          PRIMARY_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -n 1)
+          echo "primary_tag=$PRIMARY_TAG" >> $GITHUB_OUTPUT
+        shell: bash
+
+  # ====================================================================
+  # JOB 2: Deploy the new Docker image to the production server
+  # ====================================================================
+  deploy-to-server:
+    name: Deploy to Production Server
+    runs-on: ubuntu-latest
+    needs: build-and-push-image # This job only runs if the build job succeeds
+    environment: production   # Links to your "production" environment for secrets
+
+    steps:
+      - name: Set up SSH key for server access
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Deploy to server via SSH
+        env:
+          TARGET_SSH_HOST: ${{ secrets.SSH_HOST }}
+          TARGET_SSH_USER: ${{ secrets.SSH_USER }}
+          FULL_IMAGE_URI: ${{ needs.build-and-push-image.outputs.image_uri }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          GHCR_USERNAME: ${{ github.repository_owner }}
+          # Pass application secrets to the container
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_VISION_MODEL: ${{ secrets.GEMINI_VISION_MODEL }}
+          GEMINI_TEXT_MODEL: ${{ secrets.GEMINI_TEXT_MODEL }}
+        run: |
+          # Add the server's host key to known_hosts to avoid interactive prompts
+          ssh-keyscan -H "${TARGET_SSH_HOST}" >> ~/.ssh/known_hosts
+
+          # Connect to the server and execute deployment commands.
+          ssh -o StrictHostKeyChecking=no "${TARGET_SSH_USER}@${TARGET_SSH_HOST}" << EOF
+            set -ex
+
+            # Log in to GitHub Container Registry to pull the private image
+            echo "${GHCR_PULL_TOKEN}" | sudo docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin
+
+            # Create the systemd service file to manage the container.
+            # This service file passes the necessary environment variables to the bot.
+            echo "[Unit]" | sudo tee "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "Description=${{ env.CONTAINER_NAME }} Docker Container" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "Requires=docker.service" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "After=docker.service network.target" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "[Service]" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "Restart=always" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "RestartSec=10" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "Environment=\"TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}\"" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "Environment=\"GEMINI_API_KEY=${GEMINI_API_KEY}\"" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "Environment=\"GEMINI_VISION_MODEL=${GEMINI_VISION_MODEL}\"" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "Environment=\"GEMINI_TEXT_MODEL=${GEMINI_TEXT_MODEL}\"" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "ExecStartPre=-/usr/bin/docker stop ${{ env.CONTAINER_NAME }}" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "ExecStartPre=-/usr/bin/docker rm ${{ env.CONTAINER_NAME }}" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "ExecStartPre=/usr/bin/docker pull ${FULL_IMAGE_URI}" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "ExecStart=/usr/bin/docker run --rm --name ${{ env.CONTAINER_NAME }} ${FULL_IMAGE_URI}" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "ExecStop=/usr/bin/docker stop ${{ env.CONTAINER_NAME }}" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "[Install]" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+            echo "WantedBy=multi-user.target" | sudo tee -a "/etc/systemd/system/${{ env.CONTAINER_NAME }}.service"
+
+            # Reload systemd, enable the service to start on boot, and restart it to apply changes
+            sudo systemctl daemon-reload
+            sudo systemctl enable "${{ env.CONTAINER_NAME }}.service"
+            sudo systemctl restart "${{ env.CONTAINER_NAME }}.service"
+
+            echo "Deployment of ${{ env.CONTAINER_NAME }} finished successfully."
+          EOF
+        shell: bash
